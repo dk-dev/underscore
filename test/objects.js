@@ -5,6 +5,9 @@
 
   var testElement = typeof document === 'object' ? document.createElement('div') : void 0;
 
+  // Some browsers support typed arrays but not DataView and some applications could override DataView
+  var DataViewImpl = typeof NativeDataView !== 'undefined' ? NativeDataView : typeof DataView !== 'undefined' ? DataView : undefined;
+
   QUnit.test('keys', function(assert) {
     assert.deepEqual(_.keys({one: 1, two: 2}), ['one', 'two'], 'can extract the keys from an object');
     // the test above is not safe because it relies on for-in enumeration order
@@ -359,6 +362,10 @@
     // Comparisons involving `NaN`.
     assert.ok(_.isEqual(NaN, NaN), '`NaN` is equal to `NaN`');
     assert.ok(_.isEqual(new Number(NaN), NaN), 'Object(`NaN`) is equal to `NaN`');
+    assert.ok(_.isEqual(NaN, new Number(NaN)), 'Commutative equality is implemented for `NaN` and its object wrapper');
+    assert.ok(_.isEqual([NaN], [new Number(NaN)]), 'Wrapped `NaN` is equivalent inside arrays');
+    assert.ok(_.isEqual({value: NaN}, {value: new Number(NaN)}), 'Wrapped `NaN` is equivalent inside objects');
+    assert.ok(!_.isEqual(NaN, new Number(79)), '`NaN` is not equal to a finite number object');
     assert.ok(!_.isEqual(61, NaN), 'A number primitive is not equal to `NaN`');
     assert.ok(!_.isEqual(new Number(79), NaN), 'A number object is not equal to `NaN`');
     assert.ok(!_.isEqual(Infinity, NaN), '`Infinity` is not equal to `NaN`');
@@ -449,6 +456,26 @@
     assert.ok(!_.isEqual({a: 1, b: 2}, {a: 1}), 'Objects of different sizes are not equal');
     assert.ok(!_.isEqual({a: 1}, {a: 1, b: 2}), 'Commutative equality is implemented for objects');
     assert.ok(!_.isEqual({x: 1, y: void 0}, {x: 1, z: 2}), 'Objects with identical keys and different values are not equivalent');
+
+    // Extremely deeply nested objects (CVE-2026-27601).
+    var hasMap = (typeof Map === 'function');
+    var depthLimit = hasMap ? 100000 : 6000;
+    a = b = 'v';
+    for (var i = 0; i < depthLimit; ++i) {
+      a = {x: a};
+      b = {x: b};
+    }
+    assert.ok(_.isEqual(a, b), 'Very deeply nested objects can be equal');
+    b = {x: b};
+    assert.ok(!_.isEqual(a, b), 'Very deeply nested objects can be different');
+    assert.ok(!_.isEqual(b, a), 'Commutative equality is implemented for very deeply nested objects');
+    if (!hasMap) {
+      for (i = 0; i < depthLimit; ++i) {
+        a = {x: a};
+        b = {x: b};
+      }
+      assert.raises(_.partial(_.isEqual, a, b), RangeError);
+    }
 
     // `A` contains nested objects and arrays.
     a = {
@@ -610,11 +637,11 @@
       assert.notOk(_.isEqual(view1, view2), 'same buffer with different offset is not equal');
 
       // Some older browsers support typed arrays but not DataView.
-      if (typeof DataView !== 'undefined') {
-        assert.ok(_.isEqual(new DataView(u8.buffer), new DataView(u8b.buffer)), 'Identical DataViews are equal');
-        assert.ok(_.isEqual(new DataView(u8.buffer), new DataView(i8.buffer)), 'Identical DataViews of different typed arrays are equal');
-        assert.notOk(_.isEqual(new DataView(u8.buffer), new DataView(u16.buffer)), 'Different DataViews with different length are not equal');
-        assert.notOk(_.isEqual(new DataView(u8.buffer), new DataView(u16one.buffer)), 'Different DataViews with different byte data are not equal');
+      if (DataViewImpl) {
+        assert.ok(_.isEqual(new DataViewImpl(u8.buffer), new DataViewImpl(u8b.buffer)), 'Identical DataViews are equal');
+        assert.ok(_.isEqual(new DataViewImpl(u8.buffer), new DataViewImpl(i8.buffer)), 'Identical DataViews of different typed arrays are equal');
+        assert.notOk(_.isEqual(new DataViewImpl(u8.buffer), new DataViewImpl(u16.buffer)), 'Different DataViews with different length are not equal');
+        assert.notOk(_.isEqual(new DataViewImpl(u8.buffer), new DataViewImpl(u16one.buffer)), 'Different DataViews with different byte data are not equal');
       }
     }
   });
@@ -931,8 +958,8 @@
         'a TypedArray': new Uint8Array(buffer)
       };
       // Some older browsers support typed arrays but not DataView.
-      if (typeof DataView !== 'undefined') {
-        checkValues['a DataView'] = new DataView(buffer);
+      if (DataViewImpl) {
+        checkValues['a DataView'] = new DataViewImpl(buffer);
       }
       var types = ['an ArrayBuffer', 'a DataView', 'a TypedArray'];
       _.each(types, function(type) {

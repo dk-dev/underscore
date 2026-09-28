@@ -7,19 +7,19 @@
     exports.noConflict = function () { global._ = current; return exports; };
   }()));
 }(this, (function () {
-  //     Underscore.js 1.13.2
+  //     Underscore.js 1.13.8
   //     https://underscorejs.org
-  //     (c) 2009-2021 Jeremy Ashkenas, Julian Gonggrijp, and DocumentCloud and Investigative Reporters & Editors
+  //     (c) 2009-2026 Jeremy Ashkenas, Julian Gonggrijp, and DocumentCloud and Investigative Reporters & Editors
   //     Underscore may be freely distributed under the MIT license.
 
   // Current version.
-  var VERSION = '1.13.2';
+  var VERSION = '1.13.8';
 
   // Establish the root object, `window` (`self`) in the browser, `global`
   // on the server, or `this` in some virtual machines. We use `self`
   // instead of `window` for `WebWorker` support.
-  var root = typeof self == 'object' && self.self === self && self ||
-            typeof global == 'object' && global.global === global && global ||
+  var root = (typeof self == 'object' && self.self === self && self) ||
+            (typeof global == 'object' && global.global === global && global) ||
             Function('return this')() ||
             {};
 
@@ -87,7 +87,7 @@
   // Is a given variable an object?
   function isObject(obj) {
     var type = typeof obj;
-    return type === 'function' || type === 'object' && !!obj;
+    return type === 'function' || (type === 'object' && !!obj);
   }
 
   // Is a given value equal to null?
@@ -150,8 +150,11 @@
   // In IE 10 - Edge 13, `DataView` has string tag `'[object Object]'`.
   // In IE 11, the most common among them, this problem also applies to
   // `Map`, `WeakMap` and `Set`.
-  var hasStringTagBug = (
-        supportsDataView && hasObjectTag(new DataView(new ArrayBuffer(8)))
+  // Also, there are cases where an application can override the native
+  // `DataView` object, in cases like that we can't use the constructor
+  // safely and should just rely on alternate `DataView` checks
+  var hasDataViewBug = (
+        supportsDataView && (!/\[native code\]/.test(String(DataView)) || hasObjectTag(new DataView(new ArrayBuffer(8))))
       ),
       isIE11 = (typeof Map !== 'undefined' && hasObjectTag(new Map));
 
@@ -159,11 +162,13 @@
 
   // In IE 10 - Edge 13, we need a different heuristic
   // to determine whether an object is a `DataView`.
-  function ie10IsDataView(obj) {
+  // Also, in cases where the native `DataView` is
+  // overridden we can't rely on the tag itself.
+  function alternateIsDataView(obj) {
     return obj != null && isFunction$1(obj.getInt8) && isArrayBuffer(obj.buffer);
   }
 
-  var isDataView$1 = (hasStringTagBug ? ie10IsDataView : isDataView);
+  var isDataView$1 = (hasDataViewBug ? alternateIsDataView : isDataView);
 
   // Is a given value an array?
   // Delegates to ECMA5's native `Array.isArray`.
@@ -264,7 +269,7 @@
     keys = emulatedSet(keys);
     var nonEnumIdx = nonEnumerableProps.length;
     var constructor = obj.constructor;
-    var proto = isFunction$1(constructor) && constructor.prototype || ObjProto;
+    var proto = (isFunction$1(constructor) && constructor.prototype) || ObjProto;
 
     // Constructor is a special case.
     var prop = 'constructor';
@@ -349,132 +354,277 @@
     );
   }
 
+  // Return a random integer between `min` and `max` (inclusive).
+  function random(min, max) {
+    if (max == null) {
+      max = min;
+      min = 0;
+    }
+    return min + Math.floor(Math.random() * (max - min + 1));
+  }
+
+  // Generate a unique integer id (unique within the entire client session).
+  // Useful for temporary DOM ids.
+  var idCounter = 0;
+  function uniqueId(prefix) {
+    var id = ++idCounter + '';
+    return prefix ? prefix + id : id;
+  }
+
+  // In environments that don't have `Map`, `isEqual` will perform a linear search
+  // in order to detect cycles in the compared objects. This causes quadratic
+  // runtime complexity in the depth of the compared objects. To prevent the CPU
+  // from wasting billions of cycles on excessively deep objects, we impose a
+  // limit on the total number of comparisons per call to `isEqual`. This limit is
+  // chosen to be generous while also keeping performance degradation at a
+  // minimum.
+  var comparisonLimit = 5e7;
+
+  // Internal helper for isEqual to create a simple, specialized lookup
+  // datastructure for cycle detection in nested objects.
+  function cycleTracker() {
+    // The lookup object. It keeps track of data and has methods.
+    // If possible, use the modern `Map` datastructure.
+    if (typeof Map === 'function') return {
+      map: new Map(),
+      // Besides a map, we also keep an array so we know which object was added
+      // last.
+      tracked: [],
+      // Store the fact that `a` and `b` appeared at the same position in the
+      // composition tree on either side of the comparison.
+      push: function(a, b) {
+        this.tracked.push(a);
+        this.map.set(a, b);
+      },
+      // Remove the last added pair.
+      pop: function() {
+        this.map['delete'](this.tracked.pop());
+      },
+      // Check whether we have seen `a` before.
+      has: function(a) {
+        return this.map.has(a);
+      },
+      // Check whether `b` was previously seen at the same point of comparison as
+      // `a`. This method is only invoked if `this.has(a)` returned `true`.
+      match: function(a, b) {
+        return this.map.get(a) === b;
+      },
+      // As soon as we find any difference, we can stop the comparison and return
+      // `false`. This methods is invoked in that scenario to clean up remaining
+      // data, so we don't create memory leaks.
+      abort: function(a, b) {
+        this.tracked.length = 0;
+        this.map.clear();
+        // Return `false` so we can clean up and return in a single statement.
+        return false;
+      }
+    };
+    // We now enter the alternative branch, a situation where `Map` is not
+    // available.
+
+    // The fallback lookup structure. It has the same interface as the one based
+    // on `Map`, but uses linear search instead. Because of this, the runtime
+    // complexity is quadratic in the depth of the compared objects.
+    return {
+      tracked: [],
+      trackedB: [],
+      lookups: 0,
+      push: function(a, b) {
+        this.tracked.push(a);
+        this.trackedB.push(b);
+      },
+      pop: function() {
+        this.tracked.pop();
+        this.trackedB.pop();
+      },
+      has: function(a) {
+        // While the algorithm could run to arbitrary comparison depth in
+        // principle, the quadratic runtime cost is going to hurt performance
+        // significantly once the depth reaches over a few thousand levels. To
+        // prevent excessive performance degradation, we keep track of the number
+        // of comparisons and abort the operation when this number passes a limit.
+        if (this.lookups >= comparisonLimit) throw RangeError(
+          'Comparison limit exceeded. Wrap call to isEqual in try/catch or ' +
+          'limit the depth of compared objects.'
+        );
+        // The following loop is **the** hot loop, so we keep it as light as
+        // possible.
+        for (var i = 0, l = this.tracked.length; i < l; ++i) {
+          if (this.tracked[i] === a) break;
+        }
+        // We only update the number of comparisons after the loop, exploiting the
+        // fact that `i` is still in scope and contains the approximate number of
+        // comparisons made. `this.lookups` can exceed `comparisonLimit` as a
+        // result, but this is unproblematic.
+        this.lookups += i;
+        // Return the index where `a` was found, plus one so it doesn't look
+        // falsy.
+        return i < l ? i + 1 : false;
+      },
+      // The `match` method takes one argument more than the corresponding method
+      // in the `Map`-based variant, because we just need to know whether the `a`
+      // and the `b` appear at the same index within their respective tracking
+      // arrays. The index of `a` was already found and returned in the call to
+      // `match`.
+      match: function(a, b, i) {
+        // `match` added one to the index so it would be truthy, so we have to
+        // subtract one again over here.
+        return this.trackedB[i - 1] === b;
+      },
+      abort: function() {
+        this.tracked.length = 0;
+        this.trackedB.length = 0;
+        return false;
+      }
+    };
+  }
+
   // We use this string twice, so give it a name for minification.
   var tagDataView = '[object DataView]';
 
-  // Internal recursive comparison function for `_.isEqual`.
-  function eq(a, b, aStack, bStack) {
-    // Identical objects are equal. `0 === -0`, but they aren't identical.
-    // See the [Harmony `egal` proposal](https://wiki.ecmascript.org/doku.php?id=harmony:egal).
-    if (a === b) return a !== 0 || 1 / a === 1 / b;
-    // `null` or `undefined` only equal to itself (strict comparison).
-    if (a == null || b == null) return false;
-    // `NaN`s are equivalent, but non-reflexive.
-    if (a !== a) return b !== b;
-    // Exhaust primitive checks
-    var type = typeof a;
-    if (type !== 'function' && type !== 'object' && typeof b != 'object') return false;
-    return deepEq(a, b, aStack, bStack);
-  }
+  // Perform a deep comparison to check if two objects are equal.
+  function isEqual(a, b) {
+    // Keep track of which pairs of values need to be compared. We will be
+    // trampolining on this stack instead of using function recursion.
+    // (CVE-2026-27601)
+    var todo = [{a: a, b: b}];
+    // Create a specialized datastructure for cycle detection.
+    var tracker = cycleTracker();
 
-  // Internal recursive comparison function for `_.isEqual`.
-  function deepEq(a, b, aStack, bStack) {
-    // Unwrap any wrapped objects.
-    if (a instanceof _$1) a = a._wrapped;
-    if (b instanceof _$1) b = b._wrapped;
-    // Compare `[[Class]]` names.
-    var className = toString.call(a);
-    if (className !== toString.call(b)) return false;
-    // Work around a bug in IE 10 - Edge 13.
-    if (hasStringTagBug && className == '[object Object]' && isDataView$1(a)) {
-      if (!isDataView$1(b)) return false;
-      className = tagDataView;
-    }
-    switch (className) {
-      // These types are compared by value.
+    // Keep traversing pairs until there is nothing left to compare.
+    while (todo.length) {
+      var frame = todo.pop();
+      // As a special case, a single `true` on the todo means that we can
+      // pop from the cycle tracker.
+      if (frame === true) {
+        tracker.pop();
+        continue;
+      }
+      a = frame.a;
+      b = frame.b;
+
+      // Identical objects are equal. `0 === -0`, but they aren't identical.
+      // See the [Harmony `egal` proposal](https://wiki.ecmascript.org/doku.php?id=harmony:egal).
+      if (a === b) {
+        if (a !== 0 || 1 / a === 1 / b) continue;
+        return tracker.abort();
+      }
+      // `null` or `undefined` only equal to itself (strict comparison).
+      if (a == null || b == null) return tracker.abort();
+      // `NaN`s are equivalent, but non-reflexive.
+      if (a !== a && typeof b !== 'object') {
+        if (b !== b) continue;
+        return tracker.abort();
+      }
+      // Exhaust primitive checks
+      var type = typeof a;
+      if (type !== 'function' && type !== 'object' && typeof b != 'object') {
+        return tracker.abort();
+      }
+
+      // Unwrap any wrapped objects.
+      if (a instanceof _$1) a = a._wrapped;
+      if (b instanceof _$1) b = b._wrapped;
+      // Compare `[[Class]]` names.
+      var className = toString.call(a);
+      if (className !== toString.call(b)) return tracker.abort();
+      // Work around a bug in IE 10 - Edge 13.
+      if (hasDataViewBug && className == '[object Object]' && isDataView$1(a)) {
+        if (!isDataView$1(b)) return tracker.abort();
+        className = tagDataView;
+      }
+      switch (className) {
+        // These types are compared by value.
       case '[object RegExp]':
         // RegExps are coerced to strings for comparison (Note: '' + /a/i === '/a/i')
       case '[object String]':
         // Primitives and their corresponding object wrappers are equivalent; thus, `"5"` is
         // equivalent to `new String("5")`.
-        return '' + a === '' + b;
+        if ('' + a === '' + b) continue;
+        return tracker.abort();
       case '[object Number]':
-        // `NaN`s are equivalent, but non-reflexive.
-        // Object(NaN) is equivalent to NaN.
-        if (+a !== +a) return +b !== +b;
-        // An `egal` comparison is performed for other numeric values.
-        return +a === 0 ? 1 / +a === 1 / b : +a === +b;
+        todo.push({a: +a, b: +b});
+        continue;
       case '[object Date]':
       case '[object Boolean]':
         // Coerce dates and booleans to numeric primitive values. Dates are compared by their
         // millisecond representations. Note that invalid dates with millisecond representations
         // of `NaN` are not equivalent.
-        return +a === +b;
+        if (+a === +b) continue;
+        return tracker.abort();
       case '[object Symbol]':
-        return SymbolProto.valueOf.call(a) === SymbolProto.valueOf.call(b);
+        if (SymbolProto.valueOf.call(a) === SymbolProto.valueOf.call(b)) continue;
+        return tracker.abort();
       case '[object ArrayBuffer]':
       case tagDataView:
         // Coerce to typed array so we can fall through.
-        return deepEq(toBufferView(a), toBufferView(b), aStack, bStack);
-    }
+        todo.push({a: toBufferView(a), b: toBufferView(b)});
+        continue;
+      }
 
-    var areArrays = className === '[object Array]';
-    if (!areArrays && isTypedArray$1(a)) {
+      var areArrays = className === '[object Array]';
+      if (!areArrays && isTypedArray$1(a)) {
         var byteLength = getByteLength(a);
-        if (byteLength !== getByteLength(b)) return false;
-        if (a.buffer === b.buffer && a.byteOffset === b.byteOffset) return true;
+        if (byteLength !== getByteLength(b)) return tracker.abort();
+        if (a.buffer === b.buffer && a.byteOffset === b.byteOffset) continue;
         areArrays = true;
-    }
-    if (!areArrays) {
-      if (typeof a != 'object' || typeof b != 'object') return false;
+      }
+      if (!areArrays) {
+        if (typeof a != 'object' || typeof b != 'object') return tracker.abort();
 
-      // Objects with different constructors are not equivalent, but `Object`s or `Array`s
-      // from different frames are.
-      var aCtor = a.constructor, bCtor = b.constructor;
-      if (aCtor !== bCtor && !(isFunction$1(aCtor) && aCtor instanceof aCtor &&
-                               isFunction$1(bCtor) && bCtor instanceof bCtor)
-                          && ('constructor' in a && 'constructor' in b)) {
-        return false;
+        // Objects with different constructors are not equivalent, but `Object`s or `Array`s
+        // from different frames are.
+        var aCtor = a.constructor, bCtor = b.constructor;
+        if (aCtor !== bCtor && !(isFunction$1(aCtor) && aCtor instanceof aCtor &&
+                                 isFunction$1(bCtor) && bCtor instanceof bCtor)
+            && ('constructor' in a && 'constructor' in b)) {
+          return tracker.abort();
+        }
+      }
+
+      // Assume equality for cyclic structures. The algorithm for detecting cyclic
+      // structures is adapted from ES 5.1 section 15.12.3, abstract operation `JO`.
+
+      var found = tracker.has(a);
+      if (found) {
+        // Depending on the type of `tracker` used, `found` may be just a boolean
+        // or a special value that aids in finding a matching `b`. For the latter
+        // reason, we pass it back to `tracker.match`.
+        if (tracker.match(a, b, found)) continue;
+        return tracker.abort();
+      }
+
+      // Add the objects to the tracker.
+      tracker.push(a, b);
+      // Remember to remove them again after the recursion below.
+      todo.push(true);
+
+      // Recursively compare objects and arrays.
+      var length;
+      if (areArrays) {
+        // Compare array lengths to determine if a deep comparison is necessary.
+        length = a.length;
+        if (length !== b.length) return tracker.abort();
+        // Deep compare the contents, ignoring non-numeric properties.
+        while (length--) {
+          todo.push({a: a[length], b: b[length]});
+        }
+      } else {
+        // Deep compare objects.
+        var _keys = keys(a), key;
+        length = _keys.length;
+        // Ensure that both objects contain the same number of properties before comparing deep equality.
+        if (keys(b).length !== length) return tracker.abort();
+        while (length--) {
+          // Deep compare each member
+          key = _keys[length];
+          if (!has$1(b, key)) return tracker.abort();
+          todo.push({a: a[key], b: b[key]});
+        }
       }
     }
-    // Assume equality for cyclic structures. The algorithm for detecting cyclic
-    // structures is adapted from ES 5.1 section 15.12.3, abstract operation `JO`.
-
-    // Initializing stack of traversed objects.
-    // It's done here since we only need them for objects and arrays comparison.
-    aStack = aStack || [];
-    bStack = bStack || [];
-    var length = aStack.length;
-    while (length--) {
-      // Linear search. Performance is inversely proportional to the number of
-      // unique nested structures.
-      if (aStack[length] === a) return bStack[length] === b;
-    }
-
-    // Add the first object to the stack of traversed objects.
-    aStack.push(a);
-    bStack.push(b);
-
-    // Recursively compare objects and arrays.
-    if (areArrays) {
-      // Compare array lengths to determine if a deep comparison is necessary.
-      length = a.length;
-      if (length !== b.length) return false;
-      // Deep compare the contents, ignoring non-numeric properties.
-      while (length--) {
-        if (!eq(a[length], b[length], aStack, bStack)) return false;
-      }
-    } else {
-      // Deep compare objects.
-      var _keys = keys(a), key;
-      length = _keys.length;
-      // Ensure that both objects contain the same number of properties before comparing deep equality.
-      if (keys(b).length !== length) return false;
-      while (length--) {
-        // Deep compare each member
-        key = _keys[length];
-        if (!(has$1(b, key) && eq(a[key], b[key], aStack, bStack))) return false;
-      }
-    }
-    // Remove the first object from the stack of traversed objects.
-    aStack.pop();
-    bStack.pop();
+    // We made it to the end and found no differences.
     return true;
-  }
-
-  // Perform a deep comparison to check if two objects are equal.
-  function isEqual(a, b) {
-    return eq(a, b);
   }
 
   // Retrieve all the enumerable property names of an object.
@@ -789,15 +939,6 @@
     return accum;
   }
 
-  // Return a random integer between `min` and `max` (inclusive).
-  function random(min, max) {
-    if (max == null) {
-      max = min;
-      min = 0;
-    }
-    return min + Math.floor(Math.random() * (max - min + 1));
-  }
-
   // A (possibly faster) way to get the current timestamp as an integer.
   var now = Date.now || function() {
     return new Date().getTime();
@@ -964,14 +1105,6 @@
     return obj;
   }
 
-  // Generate a unique integer id (unique within the entire client session).
-  // Useful for temporary DOM ids.
-  var idCounter = 0;
-  function uniqueId(prefix) {
-    var id = ++idCounter + '';
-    return prefix ? prefix + id : id;
-  }
-
   // Start chaining a wrapped Underscore object.
   function chain(obj) {
     var instance = _$1(obj);
@@ -1026,26 +1159,31 @@
   // Avoids a very nasty iOS 8 JIT bug on ARM-64. #2094
   var isArrayLike = createSizePropertyCheck(getLength);
 
-  // Internal implementation of a recursive `flatten` function.
-  function flatten$1(input, depth, strict, output) {
-    output = output || [];
-    if (!depth && depth !== 0) {
-      depth = Infinity;
-    } else if (depth <= 0) {
-      return output.concat(input);
-    }
-    var idx = output.length;
-    for (var i = 0, length = getLength(input); i < length; i++) {
-      var value = input[i];
-      if (isArrayLike(value) && (isArray(value) || isArguments$1(value))) {
+  // Internal implementation of a `flatten` function.
+  function flatten$1(input, depth, strict) {
+    if (!depth && depth !== 0) depth = Infinity;
+    // We will be avoiding recursive calls because this could be exploited to
+    // cause a stack overflow (CVE-2026-27601). Instead, we "trampoline" on an
+    // explicit stack.
+    var output = [], idx = 0, i = 0, length = getLength(input) || 0, stack = [];
+    while (true) {
+      if (i >= length) {
+        if (!stack.length) break;
+        var frame = stack.pop();
+        i = frame.i;
+        input = frame.v;
+        length = getLength(input);
+        continue;
+      }
+      var value = input[i++];
+      if (stack.length >= depth) {
+        output[idx++] = value;
+      } else if (isArrayLike(value) && (isArray(value) || isArguments$1(value))) {
         // Flatten current level of array or arguments object.
-        if (depth > 1) {
-          flatten$1(value, depth - 1, strict, output);
-          idx = output.length;
-        } else {
-          var j = 0, len = value.length;
-          while (j < len) output[idx++] = value[j++];
-        }
+        stack.push({i: i, v: input});
+        i = 0;
+        input = value;
+        length = getLength(input);
       } else if (!strict) {
         output[idx++] = value;
       }
@@ -1467,7 +1605,8 @@
   function max(obj, iteratee, context) {
     var result = -Infinity, lastComputed = -Infinity,
         value, computed;
-    if (iteratee == null || typeof iteratee == 'number' && typeof obj[0] != 'object' && obj != null) {
+    if (obj == null) return result;
+    if (iteratee == null || (typeof iteratee == 'number' && typeof obj[0] != 'object')) {
       obj = isArrayLike(obj) ? obj : values(obj);
       for (var i = 0, length = obj.length; i < length; i++) {
         value = obj[i];
@@ -1479,7 +1618,7 @@
       iteratee = cb(iteratee, context);
       each(obj, function(v, index, list) {
         computed = iteratee(v, index, list);
-        if (computed > lastComputed || computed === -Infinity && result === -Infinity) {
+        if (computed > lastComputed || (computed === -Infinity && result === -Infinity)) {
           result = v;
           lastComputed = computed;
         }
@@ -1492,7 +1631,8 @@
   function min(obj, iteratee, context) {
     var result = Infinity, lastComputed = Infinity,
         value, computed;
-    if (iteratee == null || typeof iteratee == 'number' && typeof obj[0] != 'object' && obj != null) {
+    if (obj == null) return result;
+    if (iteratee == null || (typeof iteratee == 'number' && typeof obj[0] != 'object')) {
       obj = isArrayLike(obj) ? obj : values(obj);
       for (var i = 0, length = obj.length; i < length; i++) {
         value = obj[i];
@@ -1504,7 +1644,7 @@
       iteratee = cb(iteratee, context);
       each(obj, function(v, index, list) {
         computed = iteratee(v, index, list);
-        if (computed < lastComputed || computed === Infinity && result === Infinity) {
+        if (computed < lastComputed || (computed === Infinity && result === Infinity)) {
           result = v;
           lastComputed = computed;
         }
@@ -1520,7 +1660,7 @@
     if (isArray(obj)) return slice.call(obj);
     if (isString(obj)) {
       // Keep surrogate pair characters together.
-      return obj.match(reStrSymbol);
+      return obj.match(reStrSymbol) || [];
     }
     if (isArrayLike(obj)) return map(obj, identity);
     return values(obj);
@@ -1772,7 +1912,7 @@
   // Complement of zip. Unzip accepts an array of arrays and groups
   // each array's elements on shared indices.
   function unzip(array) {
-    var length = array && max(array, getLength).length || 0;
+    var length = (array && max(array, getLength).length) || 0;
     var result = Array(length);
 
     for (var index = 0; index < length; index++) {
